@@ -11,7 +11,7 @@ const SB = 250;
 const SE = 240;
 const WONT = 252;
 const NAWS_OPTION = 31;
-const MXP_OPTION = 91;  // MUD eXtension Protocol (RFC pending)
+const MXP_OPTION  = 91; // MUD eXtension Protocol (option 91)
 
 // Suppress unused-variable warnings — kept for readability/completeness
 const _WILL = WILL;
@@ -216,7 +216,7 @@ async function handleTelnetConnection(conn: Deno.Conn, wsPort: number, welcome: 
   // Send IAC DO NAWS to request window size from the client
   await write(new Uint8Array([IAC, DO, NAWS_OPTION]));
 
-  // Send IAC WILL MXP to offer MXP support
+  // Offer MXP support; client responds IAC DO 91 to accept or IAC DONT 91 to decline
   let mxpEnabled = false;
   await write(new Uint8Array([IAC, WILL, MXP_OPTION]));
 
@@ -254,14 +254,17 @@ async function handleTelnetConnection(conn: Deno.Conn, wsPort: number, welcome: 
 
           // If message is meant for Telnet, it should be in 'msg' (formatted ANSI)
           if (payload.msg) {
-            let out = payload.msg;
-            // Process MXP send tags: \x03MXP[command|text]\x03
+            let out: string = payload.msg;
+            // Expand or strip MXP markers produced by the %mxp[] parser substitution
             if (mxpEnabled) {
-              out = out.replace(/\x03MXP\[([^\|]+)\|([^\]]+)\]\x03/g,
-                '\x1b[4z<send href="$1">$2</send>');
+              // ESC [ 4 z activates MXP open mode; wrap text in <send> tag
+              out = out.replace(
+                /\x03MXP\[([^\|]+)\|([^\]]+)\]\x03/g,
+                '\x1b[4z<send href="$1">$2</send>',
+              );
             } else {
-              // Strip MXP markers, show plain text
-              out = out.replace(/\x03MXP\[([^\|]+)\|([^\]]+)\]\x03/g, '$2');
+              // Non-MXP clients get the plain-text portion only
+              out = out.replace(/\x03MXP\[([^\|]+)\|([^\]]+)\]\x03/g, "$2");
             }
             write(out.replace(/[\r\n]+$/, "") + "\r\n");
           }
@@ -333,10 +336,10 @@ async function handleTelnetConnection(conn: Deno.Conn, wsPort: number, welcome: 
 
       // --- MXP negotiation detection ---
       for (let i = 0; i < chunk.length - 2; i++) {
-        if (chunk[i] === IAC && chunk[i + 1] === DO && chunk[i + 2] === MXP_OPTION) {
+        if (chunk[i] === IAC && chunk[i + 1] === DO   && chunk[i + 2] === MXP_OPTION) {
           mxpEnabled = true;
-          // Send MXP mode line to activate default MXP
-          await write(new Uint8Array([0x1b, 0x5b, 0x37, 0x7a])); // ESC [ 7 z — MXP open/secure mode
+          // ESC [ 7 z — activate MXP open/secure mode
+          await write(new Uint8Array([0x1b, 0x5b, 0x37, 0x7a]));
         }
         if (chunk[i] === IAC && chunk[i + 1] === DONT && chunk[i + 2] === MXP_OPTION) {
           mxpEnabled = false;

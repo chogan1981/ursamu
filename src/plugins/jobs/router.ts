@@ -1,6 +1,5 @@
 import { jobs, getNextJobNumber } from "./db.ts";
-import type { IJob, IJobComment, JobBucket } from "../../@types/IJob.ts";
-import { VALID_BUCKETS } from "../../@types/IJob.ts";
+import type { IJob, IJobComment } from "../../@types/IJob.ts";
 import { dbojs } from "../../services/Database/index.ts";
 import { jobHooks } from "./hooks.ts";
 
@@ -20,9 +19,8 @@ async function isStaffUser(userId: string | null): Promise<boolean> {
   return flags.includes("admin") || flags.includes("wizard") || flags.includes("superuser");
 }
 
-/** Strip staff-only comments (published === false) for non-staff viewers. */
-function stripUnpublishedComments(job: IJob): IJob {
-  return { ...job, comments: job.comments.filter(c => c.published) };
+function stripStaffComments(job: IJob): IJob {
+  return { ...job, comments: job.comments.filter(c => !c.staffOnly) };
 }
 
 async function resolveJob(idParam: string): Promise<IJob | null> {
@@ -33,6 +31,10 @@ async function resolveJob(idParam: string): Promise<IJob | null> {
   }
   const result = await jobs.queryOne({ id: idParam });
   return result || null;
+}
+
+function makeCommentId(): string {
+  return crypto.randomUUID();
 }
 
 // ─── route handler ────────────────────────────────────────────────────────────
@@ -49,20 +51,24 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
     if (!staff) return jsonResponse({ error: "Forbidden" }, 403);
 
     const all = await jobs.find({});
-    const byStatus: Record<string, number> = {};
-    const byBucket: Record<string, number> = {};
+    const byStatus: Record<string, number>   = { new: 0, open: 0, pending: 0, "in-progress": 0, resolved: 0, closed: 0 };
+    const byCategory: Record<string, number> = {};
+    const byPriority: Record<string, number> = { low: 0, normal: 0, high: 0, critical: 0 };
     let openAssigned = 0;
     let openUnassigned = 0;
 
     for (const j of all) {
-      byStatus[j.status] = (byStatus[j.status] || 0) + 1;
-      byBucket[j.bucket] = (byBucket[j.bucket] || 0) + 1;
-      if (j.status === "open") {
+      byStatus[j.status]   = (byStatus[j.status]   || 0) + 1;
+      const cat = j.category ?? "uncategorized";
+      byCategory[cat] = (byCategory[cat] || 0) + 1;
+      const pri = j.priority ?? "normal";
+      byPriority[pri] = (byPriority[pri] || 0) + 1;
+      if (j.status !== "closed" && j.status !== "resolved") {
         j.assignedTo ? openAssigned++ : openUnassigned++;
       }
     }
 
-    return jsonResponse({ total: all.length, byStatus, byBucket, openAssigned, openUnassigned });
+    return jsonResponse({ total: all.length, byStatus, byCategory, byPriority, openAssigned, openUnassigned });
   }
 
   // ── GET /api/v1/jobs ─────────────────────────────────────────────────────
@@ -70,38 +76,42 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
     if (!userId) return jsonResponse({ error: "Unauthorized" }, 401);
     const staff = await isStaffUser(userId);
 
-    const params       = url.searchParams;
-    const filterStatus = params.get("status")      || null;
-    const filterBucket = params.get("bucket")      || null;
-    const filterAssign = params.get("assignedTo")   || null;
-    const filterSub    = params.get("submittedBy")  || null;
+    const params     = url.searchParams;
+    const filterStatus   = params.get("status")      || null;
+    const filterCategory = params.get("category")    || null;
+    const filterPriority = params.get("priority")    || null;
+    const filterAssigned = params.get("assignedTo")  || null;
+    const filterSub      = params.get("submittedBy") || null;
     const limit  = Math.min(parseInt(params.get("limit")  || "50", 10), 200);
     const offset = Math.max(parseInt(params.get("offset") || "0",  10), 0);
 
     let all = await jobs.find({});
 
-    // Non-staff can only see their own jobs or jobs they're added to
-    if (!staff) {
-      all = all.filter(j =>
-        j.submittedBy === userId || j.additionalPlayers?.includes(userId)
-      );
-    }
+    // visibility filter
+    all = all.filter(j => {
+      if (staff) return true;
+      if (j.staffOnly) return false;
+      return j.submittedBy === userId;
+    });
 
-    if (filterStatus) all = all.filter(j => j.status     === filterStatus);
-    if (filterBucket) all = all.filter(j => j.bucket     === filterBucket);
-    if (filterAssign) all = all.filter(j => j.assignedTo === filterAssign);
-    if (filterSub)    all = all.filter(j => j.submittedBy === filterSub);
+    // param filters
+    if (filterStatus)   all = all.filter(j => j.status      === filterStatus);
+    if (filterCategory) all = all.filter(j => j.category    === filterCategory);
+    if (filterPriority) all = all.filter(j => j.priority    === filterPriority);
+    if (filterAssigned) all = all.filter(j => j.assignedTo  === filterAssigned);
+    if (filterSub)      all = all.filter(j => j.submittedBy === filterSub);
 
     all.sort((a, b) => b.number - a.number);
     const page = all.slice(offset, offset + limit);
 
-    const result = staff ? page : page.map(stripUnpublishedComments);
+    const result = staff ? page : page.map(stripStaffComments);
     return jsonResponse(result);
   }
 
   // ── POST /api/v1/jobs ────────────────────────────────────────────────────
   if (path === "/api/v1/jobs" && method === "POST") {
     if (!userId) return jsonResponse({ error: "Unauthorized" }, 401);
+    const staff = await isStaffUser(userId);
 
     let body: Record<string, unknown>;
     try {
@@ -112,33 +122,36 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
 
     const title       = typeof body.title       === "string" ? body.title.trim()       : "";
     const description = typeof body.description === "string" ? body.description.trim() : "";
-    const bucket      = typeof body.bucket      === "string" ? body.bucket.toUpperCase() : "SPHERE";
+    const category    = typeof body.category    === "string" ? body.category.toLowerCase() : "request";
+    const priority    = typeof body.priority    === "string" ? body.priority.toLowerCase() : "normal";
+    const jobStaffOnly = body.staffOnly === true;
 
     if (!title || !description) {
       return jsonResponse({ error: "title and description are required" }, 400);
     }
-    if (!VALID_BUCKETS.includes(bucket as JobBucket)) {
-      return jsonResponse({ error: `Invalid bucket. Valid: ${VALID_BUCKETS.join(", ")}` }, 400);
+    if (jobStaffOnly && !staff) {
+      return jsonResponse({ error: "Forbidden: staffOnly requires staff privileges" }, 403);
     }
 
-    const player = await dbojs.queryOne({ id: userId });
+    const player = await dbojs.queryOne({ id: userId }) as import("../../@types/IDBObj.ts").IDBOBJ | false;
     const submitterName = (player && player.data?.name) || userId;
 
     const num = await getNextJobNumber();
     const now = Date.now();
     const job: IJob = {
-      id:                `job-${num}`,
-      number:            num,
+      id:            `job-${num}`,
+      number:        num,
       title,
-      bucket:            bucket as JobBucket,
-      status:            "open",
-      submittedBy:       userId,
-      submitterName:     String(submitterName),
+      category,
+      priority:      (priority as IJob["priority"]) || "normal",
+      status:        "new",
+      submittedBy:   userId,
+      submitterName,
       description,
-      comments:          [],
-      additionalPlayers: [],
-      createdAt:         now,
-      updatedAt:         now,
+      comments:      [],
+      createdAt:     now,
+      updatedAt:     now,
+      staffOnly:     jobStaffOnly,
     };
 
     await jobs.create(job);
@@ -149,8 +162,8 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
   // ── job by id/number sub-routes ──────────────────────────────────────────
   const jobMatch = path.match(/^\/api\/v1\/jobs\/([^/]+)(\/comment)?$/);
   if (jobMatch) {
-    const idParam  = jobMatch[1];
-    const subRoute = jobMatch[2] || "";
+    const idParam    = jobMatch[1];
+    const subRoute   = jobMatch[2] || "";
 
     // ── GET /api/v1/jobs/:id ───────────────────────────────────────────────
     if (!subRoute && method === "GET") {
@@ -160,11 +173,10 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
       const job = await resolveJob(idParam);
       if (!job) return jsonResponse({ error: "Not found" }, 404);
 
-      if (!staff && job.submittedBy !== userId && !job.additionalPlayers?.includes(userId)) {
-        return jsonResponse({ error: "Forbidden" }, 403);
-      }
+      if (job.staffOnly && !staff) return jsonResponse({ error: "Forbidden" }, 403);
+      if (!staff && job.submittedBy !== userId) return jsonResponse({ error: "Forbidden" }, 403);
 
-      return jsonResponse(staff ? job : stripUnpublishedComments(job));
+      return jsonResponse(staff ? job : stripStaffComments(job));
     }
 
     // ── PATCH /api/v1/jobs/:id ─────────────────────────────────────────────
@@ -183,7 +195,7 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
         return jsonResponse({ error: "Invalid JSON body" }, 400);
       }
 
-      const ALLOWED = new Set(["status", "assignedTo", "assigneeName", "title", "description", "bucket"]);
+      const ALLOWED = new Set(["status", "priority", "assignedTo", "title", "description"]);
 
       const updated = await jobs.atomicModify(job.id, (current) => {
         const next: IJob = { ...current, updatedAt: Date.now() };
@@ -193,13 +205,20 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
         return next;
       });
 
-      // Fire granular hooks
+      // Fire granular hooks based on what actually changed (compare new state to pre-update snapshot)
       if (updated.status !== job.status) {
         if (updated.status === "closed") {
           await jobHooks.emit("job:closed", updated);
+        } else if (updated.status === "resolved") {
+          await jobHooks.emit("job:resolved", updated);
+        } else if ((job.status === "closed" || job.status === "resolved") && updated.status === "open") {
+          await jobHooks.emit("job:reopened", updated);
         } else {
           await jobHooks.emit("job:status-changed", updated, job.status);
         }
+      }
+      if (updated.priority !== job.priority) {
+        await jobHooks.emit("job:priority-changed", updated, job.priority ?? "normal");
       }
       if (updated.assignedTo !== job.assignedTo) {
         await jobHooks.emit("job:assigned", updated);
@@ -230,9 +249,8 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
       const job = await resolveJob(idParam);
       if (!job) return jsonResponse({ error: "Not found" }, 404);
 
-      if (!staff && job.submittedBy !== userId && !job.additionalPlayers?.includes(userId)) {
-        return jsonResponse({ error: "Forbidden" }, 403);
-      }
+      if (job.staffOnly && !staff) return jsonResponse({ error: "Forbidden" }, 403);
+      if (!staff && job.submittedBy !== userId) return jsonResponse({ error: "Forbidden" }, 403);
 
       let body: Record<string, unknown>;
       try {
@@ -241,21 +259,22 @@ export async function jobsRouteHandler(req: Request, userId: string | null): Pro
         return jsonResponse({ error: "Invalid JSON body" }, 400);
       }
 
-      const text = typeof body.text === "string" ? body.text.trim() : "";
-      // published defaults to true; staff can set to false for internal notes
-      const published = body.published === false && staff ? false : true;
+      const text      = typeof body.text === "string" ? body.text.trim() : "";
+      const staffOnly = body.staffOnly === true;
 
       if (!text) return jsonResponse({ error: "text is required" }, 400);
+      if (staffOnly && !staff) return jsonResponse({ error: "Forbidden: staffOnly requires staff privileges" }, 403);
 
-      const player = await dbojs.queryOne({ id: userId });
+      const player = await dbojs.queryOne({ id: userId }) as import("../../@types/IDBObj.ts").IDBOBJ | false;
       const authorName = (player && player.data?.name) || userId;
 
       const comment: IJobComment = {
+        id:         makeCommentId(),
         authorId:   userId,
-        authorName: String(authorName),
+        authorName,
         text,
         timestamp:  Date.now(),
-        published,
+        staffOnly,
       };
 
       const updated: IJob = { ...job, comments: [...job.comments, comment], updatedAt: Date.now() };

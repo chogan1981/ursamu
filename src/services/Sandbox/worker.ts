@@ -18,18 +18,6 @@ interface SDKDBObj extends IDBObj {
   broadcast?: (message: string, options?: Record<string, unknown>) => void;
 }
 
-interface IMail {
-  id?: string;
-  from: string;
-  to: string[];
-  cc?: string[];
-  bcc?: string[];
-  subject: string;
-  message: string;
-  read: boolean;
-  date: number;
-}
-
 interface IUrsamuSDK {
   state: Record<string, unknown>;
   me: IDBObj;
@@ -86,11 +74,6 @@ interface IUrsamuSDK {
     set(name: string, options: { header?: string; lock?: string; hidden?: boolean; masking?: boolean; logHistory?: boolean; historyLimit?: number }): Promise<unknown>;
     history(name: string, limit?: number): Promise<{ id: string; playerName: string; message: string; timestamp: number }[]>;
   };
-  mail: {
-    send(mail: Partial<IMail>): Promise<void>;
-    read(query: Record<string, unknown>): Promise<IMail[]>;
-    delete(id: string): Promise<void>;
-  };
   attr: {
     get(id: string, name: string): Promise<string | null>;
   };
@@ -98,19 +81,6 @@ interface IUrsamuSDK {
   text: {
     read(id: string): Promise<string>;
     set(id: string, content: string): Promise<void>;
-  };
-  bb: {
-    listBoards(): Promise<unknown[]>;
-    listPosts(boardId: string): Promise<unknown[]>;
-    readPost(boardId: string, postNum: number): Promise<unknown | null>;
-    post(boardId: string, subject: string, body: string): Promise<{ id: string }>;
-    editPost(boardId: string, postNum: number, body: string): Promise<void>;
-    deletePost(boardId: string, postNum: number): Promise<void>;
-    createBoard(name: string, options?: { description?: string; order?: number }): Promise<unknown>;
-    destroyBoard(boardId: string): Promise<void>;
-    markRead(boardId: string): Promise<void>;
-    newPostCount(boardId: string): Promise<number>;
-    totalNewCount(): Promise<number>;
   };
   events: {
     emit(event: string, data: unknown, context?: Record<string, unknown>): Promise<void>;
@@ -393,20 +363,6 @@ self.onmessage = async (e: MessageEvent) => {
     text: {
       read: (id: string) => request<string>("text:read", { id }),
       set: (id: string, content: string) => request<void>("text:set", { id, content })
-    },
-    bb: {
-      listBoards: () => request<unknown[]>("bb:listBoards", {}),
-      listPosts: (boardId: string) => request<unknown[]>("bb:listPosts", { boardId }),
-      readPost: (boardId: string, postNum: number) => request<unknown | null>("bb:readPost", { boardId, postNum }),
-      post: (boardId: string, subject: string, body: string) => request<{ id: string }>("bb:post", { boardId, subject, body }),
-      editPost: (boardId: string, postNum: number, body: string) => request<void>("bb:editPost", { boardId, postNum, body }),
-      deletePost: (boardId: string, postNum: number) => request<void>("bb:deletePost", { boardId, postNum }),
-      createBoard: (name: string, options?: { description?: string; order?: number }) =>
-        request<unknown>("bb:createBoard", { name, ...(options || {}) }),
-      destroyBoard: (boardId: string) => request<void>("bb:destroyBoard", { boardId }),
-      markRead: (boardId: string) => request<void>("bb:markRead", { boardId }),
-      newPostCount: (boardId: string) => request<number>("bb:newPostCount", { boardId }),
-      totalNewCount: () => request<number>("bb:totalNewCount", {})
     },
     events: {
       emit: (event: string, data: unknown, context?: Record<string, unknown>) =>

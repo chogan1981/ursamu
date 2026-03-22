@@ -3,9 +3,58 @@
     {
       "name": "rhost-vision",
       "url": "https://github.com/chogan1981/ursamu-rhost-vision",
-      "ref": "v1.1.0",
+      "ref": "5cd051d989c4835279e270506acf89923f8e7f80",
       "description": "Rhost-style display — look, who, page, score, examine, inventory, +finger, +where, +staff",
       "ursamu": ">=1.8.0"
+    },
+    {
+      "name": "discord",
+      "url": "https://github.com/UrsaMU/discord-plugin",
+      "ref": "v1.1.0",
+      "description": "Webhook-based Discord integration — jobs, channels, presence, and chargen events",
+      "ursamu": ">=1.9.0"
+    },
+    {
+      "name": "jobs",
+      "url": "https://github.com/UrsaMU/jobs-plugin",
+      "ref": "v1.1.0",
+      "description": "Anomaly-style jobs/request system — player requests, staff commands, bucket access, archive, REST API",
+      "ursamu": ">=1.9.0"
+    },
+    {
+      "name": "events",
+      "url": "https://github.com/UrsaMU/events-plugin",
+      "ref": "v1.0.0",
+      "description": "In-game event calendar with RSVP tracking and REST API",
+      "ursamu": ">=1.9.2"
+    },
+    {
+      "name": "bbs",
+      "url": "https://github.com/UrsaMU/bbs-plugin",
+      "ref": "v1.0.1",
+      "description": "Full-featured Myrddin-style BBS — boards, threading, categories, IC/OOC tags, sticky posts, moderation, Discord webhooks, and scene linking.",
+      "ursamu": ">=1.9.0"
+    },
+    {
+      "name": "wiki",
+      "url": "https://github.com/UrsaMU/wiki-plugin",
+      "ref": "v1.0.0",
+      "description": "File-based markdown wiki — pages, search, history, access control, backlinks, and Discord webhooks.",
+      "ursamu": ">=1.9.0"
+    },
+    {
+      "name": "mail",
+      "url": "https://github.com/UrsaMU/mail-plugin",
+      "ref": "v1.0.1",
+      "description": "In-game mail system — drafts, reply/forward, folders, attachments, quota, expiry, and REST API.",
+      "ursamu": ">=1.9.3"
+    },
+    {
+      "name": "builder",
+      "url": "https://github.com/UrsaMU/builder-plugin",
+      "ref": "v1.0.0",
+      "description": "World-building commands (@dig, @open, @link, @describe, @examine, and more) plus REST API at /api/v1/building/*.",
+      "ursamu": ">=1.9.5"
     }
   ]
 }

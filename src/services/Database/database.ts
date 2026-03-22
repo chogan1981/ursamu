@@ -1,7 +1,6 @@
 import type { IDBOBJ } from "../../@types/IDBObj.ts";
 import { getConfig } from "../Config/mod.ts";
 import type { IChannel, IChanMessage } from "../../@types/Channels.ts";
-import type { IMail } from "../../@types/IMail.ts";
 import type { ITextEntry } from "../../@types/ITextEntry.ts";
 import type { IScene } from "../../@types/IScene.ts";
 import { dpath, get, set as lodashSet } from "../../../deps.ts";
@@ -349,18 +348,10 @@ export const counters: DBO<ICounters> = new DBO<ICounters>("server.counters");
 export const dbojs: DBO<IDBOBJ> = new DBO<IDBOBJ>("server.db");
 /** Channel definitions store. */
 export const chans: DBO<IChannel> = new DBO<IChannel>("server.chans");
-/** Player mail store. */
-export const mail: DBO<IMail> = new DBO<IMail>("server.mail");
 /** Server text entries (welcome screen, MOTD, etc.). */
 export const texts: DBO<ITextEntry> = new DBO<ITextEntry>("server.texts");
 /** Scene (scene-logger) store. */
 export const scenes: DBO<IScene> = new DBO<IScene>("server.scenes");
 
-import type { IBBoard } from "../../@types/IBBoard.ts";
-import type { IBBoardPost } from "../../@types/IBBoardPost.ts";
-/** Bulletin board group definitions. */
-export const bboards: DBO<IBBoard> = new DBO<IBBoard>("server.bboards");
-/** Individual bulletin board posts. */
-export const bboard: DBO<IBBoardPost> = new DBO<IBBoardPost>("server.bboard");
 /** Channel message history (opt-in per channel). */
 export const chanHistory: DBO<IChanMessage> = new DBO<IChanMessage>("server.chan_history");

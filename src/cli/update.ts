@@ -10,7 +10,7 @@ import { parse } from "jsr:@std/flags@^0.224.0";
 import { join } from "jsr:@std/path@^0.224.0";
 import { existsSync } from "jsr:@std/fs@^0.224.0";
 import { bold, cyan, dim, green, red, yellow } from "jsr:@std/fmt@^0.224.0/colors";
-import { GAME_PROJECT_TASKS } from "./game-project-tasks.ts";
+import { GAME_PROJECT_TASKS, DEFAULT_PLUGINS_MANIFEST } from "./game-project-tasks.ts";
 
 const args = parse(Deno.args, {
   boolean: ["help", "dry-run"],
@@ -251,4 +251,75 @@ try {
   if (synced > 0) console.log(`Synced ${synced} shell script(s) in scripts/.`);
 } catch (e) {
   console.warn(`Warning: could not sync shell scripts — ${e}`);
+}
+
+// ── 8. ensure plugins.manifest.json exists + sync upstream refs ───────────────
+
+const manifestPath = join(cwd, "src", "plugins", "plugins.manifest.json");
+
+if (!existsSync(manifestPath)) {
+  if (!dryRun) {
+    await Deno.mkdir(join(cwd, "src", "plugins"), { recursive: true });
+    await Deno.writeTextFile(manifestPath, JSON.stringify(DEFAULT_PLUGINS_MANIFEST, null, 2));
+    console.log(`${green("✓")} Created missing src/plugins/plugins.manifest.json`);
+  } else {
+    console.log(`  Would create src/plugins/plugins.manifest.json`);
+  }
+} else {
+  // Sync refs for any plugin whose upstream ref has been bumped.
+  // Preserves any plugins the user added that aren't in DEFAULT_PLUGINS_MANIFEST.
+  try {
+    const gameManifest = JSON.parse(await Deno.readTextFile(manifestPath)) as { plugins: { name: string; ref?: string; [k: string]: unknown }[] };
+    const upstreamByName = Object.fromEntries(DEFAULT_PLUGINS_MANIFEST.plugins.map(p => [p.name, p]));
+    let manifestDirty = false;
+    const refChanges: string[] = [];
+
+    const gamePluginNames = new Set(gameManifest.plugins.map(p => p.name));
+    const added: string[] = [];
+
+    for (const plugin of gameManifest.plugins) {
+      const upstream = upstreamByName[plugin.name];
+      if (upstream?.ref && plugin.ref !== upstream.ref) {
+        refChanges.push(`  ${bold(cyan(plugin.name))}  ${red(plugin.ref ?? "unpinned")} → ${green(upstream.ref)}`);
+        plugin.ref = upstream.ref;
+        manifestDirty = true;
+      }
+    }
+
+    // Add any default plugins that are missing from the game manifest entirely
+    for (const upstream of DEFAULT_PLUGINS_MANIFEST.plugins) {
+      if (!gamePluginNames.has(upstream.name)) {
+        gameManifest.plugins.push({ ...upstream });
+        added.push(`  ${bold(cyan(upstream.name))}  ${green(upstream.ref ?? "unpinned")}`);
+        manifestDirty = true;
+      }
+    }
+
+    if (manifestDirty) {
+      if (!dryRun) {
+        await Deno.writeTextFile(manifestPath, JSON.stringify(gameManifest, null, 2));
+        if (refChanges.length) {
+          console.log(`${green("✓")} Synced plugin refs in src/plugins/plugins.manifest.json:`);
+          refChanges.forEach(l => console.log(l));
+        }
+        if (added.length) {
+          console.log(`${green("✓")} Added new default plugins to src/plugins/plugins.manifest.json:`);
+          added.forEach(l => console.log(l));
+        }
+      } else {
+        if (refChanges.length) {
+          console.log(`  Would update plugin refs:`);
+          refChanges.forEach(l => console.log(l));
+        }
+        if (added.length) {
+          console.log(`  Would add missing default plugins:`);
+          added.forEach(l => console.log(l));
+        }
+      }
+    } else {
+      console.log(`${green("✓")} Plugin refs already up to date.`);
+    }
+  } catch {
+    console.warn(`  Warning: could not sync plugin refs in plugins.manifest.json`);
+  }
 }

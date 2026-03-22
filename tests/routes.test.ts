@@ -4,14 +4,12 @@
  * HTTP route handler tests:
  *   - authRouter   (register + login)
  *   - dbObjRouter  (GET /dbos, GET /dbobj/:id, PATCH /dbobj/:id)
- *   - buildingRouter (POST /building/room)
- *   - wikiRouter   (GET /wiki, GET /wiki/:topic)
+ *
+ * Note: building routes moved to UrsaMU/builder-plugin.
  */
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { authHandler } from "../src/routes/authRouter.ts";
 import { dbObjHandler } from "../src/routes/dbObjRouter.ts";
-import { buildingHandler } from "../src/routes/buildingRouter.ts";
-import { wikiHandler } from "../src/routes/wikiRouter.ts";
 import { txtFiles } from "../src/services/commands/cmdParser.ts";
 import { dbojs, DBO } from "../src/services/Database/database.ts";
 import { hash, genSalt } from "../deps.ts";
@@ -21,9 +19,8 @@ const OPTS = { sanitizeResources: false, sanitizeOps: false };
 
 // IDs prefixed to avoid collisions with other test files
 const ADMIN_ID  = "rt_admin1";
-const PLAYER_ID = "rt_player1";
-const ROOM_ID   = "rt_room1";
 const OBJ_ID    = "rt_obj1";
+const ROOM_ID   = "rt_room1";
 
 async function cleanup(...ids: string[]) {
   for (const id of ids) await dbojs.delete({ id }).catch(() => {});
@@ -166,157 +163,6 @@ Deno.test("PATCH /dbobj/:id — updates data fields", OPTS, async () => {
   assertEquals(body.data?.password, undefined);
 
   await cleanup(ADMIN_ID, OBJ_ID);
-});
-
-// ===========================================================================
-// buildingRouter — POST /building/room
-// ===========================================================================
-
-Deno.test("POST /building/room — non-builder returns 403", OPTS, async () => {
-  const pw = await hash("pw", await genSalt(10));
-  await dbojs.create({ id: PLAYER_ID, flags: "player connected", data: { name: "PlainPlayer", password: pw } });
-
-  const req = new Request("http://localhost/api/v1/building/room", {
-    method: "POST",
-    body: JSON.stringify({ name: "My Room" }),
-    headers: { "Content-Type": "application/json" },
-  });
-  const res = await buildingHandler(req, PLAYER_ID);
-  assertEquals(res.status, 403);
-
-  await cleanup(PLAYER_ID);
-});
-
-Deno.test("POST /building/room — builder creates room", OPTS, async () => {
-  await dbojs.create({ id: ADMIN_ID, flags: "player builder connected", data: { name: "BuilderUser" } });
-
-  const req = new Request("http://localhost/api/v1/building/room", {
-    method: "POST",
-    body: JSON.stringify({ name: "New Room", description: "A test room." }),
-    headers: { "Content-Type": "application/json" },
-  });
-  const res = await buildingHandler(req, ADMIN_ID);
-  assertEquals(res.status, 201);
-  const body = await res.json();
-  assertEquals(body.data?.name, "New Room");
-  assertStringIncludes(body.flags, "room");
-
-  await cleanup(ADMIN_ID, body.id);
-});
-
-Deno.test("POST /building/room — missing name returns 400", OPTS, async () => {
-  await dbojs.create({ id: ADMIN_ID, flags: "player admin connected", data: { name: "BuildAdmin" } });
-
-  const req = new Request("http://localhost/api/v1/building/room", {
-    method: "POST",
-    body: JSON.stringify({ description: "No name" }),
-    headers: { "Content-Type": "application/json" },
-  });
-  const res = await buildingHandler(req, ADMIN_ID);
-  assertEquals(res.status, 400);
-
-  await cleanup(ADMIN_ID);
-});
-
-Deno.test("POST /building/room — unknown route returns 404", OPTS, async () => {
-  const req = new Request("http://localhost/api/v1/building/exit", {
-    method: "POST",
-    body: JSON.stringify({ name: "East" }),
-    headers: { "Content-Type": "application/json" },
-  });
-  const res = await buildingHandler(req, ADMIN_ID);
-  assertEquals(res.status, 404);
-});
-
-// ===========================================================================
-// #12 — buildingRouter: name > 200 chars or description > 2000 chars must 400
-// ===========================================================================
-
-Deno.test("#12 — POST /building/room — name > 200 chars returns 400", OPTS, async () => {
-  await dbojs.create({ id: ADMIN_ID, flags: "player builder connected", data: { name: "BuildAdmin12" } });
-
-  const req = new Request("http://localhost/api/v1/building/room", {
-    method: "POST",
-    body: JSON.stringify({ name: "A".repeat(201), description: "Fine" }),
-    headers: { "Content-Type": "application/json" },
-  });
-  const res = await buildingHandler(req, ADMIN_ID);
-  assertEquals(res.status, 400);
-
-  await cleanup(ADMIN_ID);
-});
-
-Deno.test("#12 — POST /building/room — description > 2000 chars returns 400", OPTS, async () => {
-  await dbojs.create({ id: ADMIN_ID, flags: "player builder connected", data: { name: "BuildAdmin12b" } });
-
-  const req = new Request("http://localhost/api/v1/building/room", {
-    method: "POST",
-    body: JSON.stringify({ name: "ValidRoom", description: "B".repeat(2001) }),
-    headers: { "Content-Type": "application/json" },
-  });
-  const res = await buildingHandler(req, ADMIN_ID);
-  assertEquals(res.status, 400);
-
-  await cleanup(ADMIN_ID);
-});
-
-// ===========================================================================
-// wikiRouter — GET /wiki and GET /wiki/:topic
-// ===========================================================================
-
-Deno.test("GET /wiki — returns list of loaded topics", OPTS, async () => {
-  // Seed a topic directly in the in-memory txtFiles Map
-  txtFiles.set("test_topic.txt", "This is a test topic.");
-
-  const req = new Request("http://localhost/api/v1/wiki");
-  const res = wikiHandler(req);
-  assertEquals(res.status, 200);
-  const body = await res.json();
-  assertEquals(Array.isArray(body), true);
-  assertEquals(body.includes("test_topic.txt"), true);
-});
-
-Deno.test("GET /wiki/:topic — returns topic content", OPTS, async () => {
-  txtFiles.set("test_topic.txt", "This is a test topic.");
-
-  const req = new Request("http://localhost/api/v1/wiki/test_topic.txt");
-  const res = wikiHandler(req);
-  assertEquals(res.status, 200);
-  const body = await res.json();
-  assertEquals(body.topic, "test_topic.txt");
-  assertStringIncludes(body.content, "test topic");
-});
-
-Deno.test("GET /wiki/:topic — unknown topic returns 404", OPTS, () => {
-  const req = new Request("http://localhost/api/v1/wiki/nonexistent_topic.txt");
-  const res = wikiHandler(req);
-  assertEquals(res.status, 404);
-});
-
-Deno.test("GET /wiki/:topic — URL-decoded topic name", OPTS, async () => {
-  txtFiles.set("help/connect.txt", "Connect help content.");
-
-  const req = new Request("http://localhost/api/v1/wiki/help%2Fconnect.txt");
-  const res = wikiHandler(req);
-  assertEquals(res.status, 200);
-  const body = await res.json();
-  assertStringIncludes(body.content, "Connect help");
-});
-
-// ===========================================================================
-// #1 — wikiRouter: path traversal guard (decodeURIComponent + ".." sequences)
-// ===========================================================================
-
-Deno.test("#1 — GET /wiki/../../../etc/passwd must return 400, not 404", OPTS, () => {
-  const req = new Request("http://localhost/api/v1/wiki/..%2F..%2F..%2Fetc%2Fpasswd");
-  const res = wikiHandler(req);
-  assertEquals(res.status, 400);
-});
-
-Deno.test("#1 — GET /wiki/topic with null byte must return 400", OPTS, () => {
-  const req = new Request("http://localhost/api/v1/wiki/topic%00.txt");
-  const res = wikiHandler(req);
-  assertEquals(res.status, 400);
 });
 
 // ===========================================================================

@@ -3,7 +3,7 @@
 import { parse } from "jsr:@std/flags@^0.224.0";
 import { join, dirname, fromFileUrl } from "jsr:@std/path@^0.224.0";
 import { existsSync } from "jsr:@std/fs@^0.224.0";
-import { GAME_PROJECT_TASKS } from "./game-project-tasks.ts";
+import { GAME_PROJECT_TASKS, DEFAULT_PLUGINS_MANIFEST } from "./game-project-tasks.ts";
 
 // Get the directory of the current script (safe for both file:// and JSR https:// URLs)
 const __dirname = import.meta.url.startsWith("file://")
@@ -308,6 +308,13 @@ for (const dir of directories) {
   console.log(`Created directory: ${dir}`);
 }
 
+// Create plugins.manifest.json — declares which plugins ensurePlugins should install
+await Deno.writeTextFile(
+  join(targetDir, "src", "plugins", "plugins.manifest.json"),
+  JSON.stringify(DEFAULT_PLUGINS_MANIFEST, null, 2),
+);
+console.log("Created src/plugins/plugins.manifest.json");
+
 // Create starter wiki page
 await Deno.writeTextFile(join(targetDir, "wiki", "home.md"), `# ${projectName} Wiki
 
@@ -416,6 +423,15 @@ const runShContent = `#!/bin/bash
 # Change to the project root directory
 cd "\$(dirname "\$0")/.." || exit
 
+# Kill any processes already bound to our ports (4201 telnet, 4202 ws, 4203 http)
+for port in 4201 4202 4203; do
+  pids=\$(lsof -ti ":\$port" 2>/dev/null)
+  if [ -n "\$pids" ]; then
+    echo "Freeing port \$port (PIDs: \$pids)..."
+    echo "\$pids" | xargs kill -9 2>/dev/null
+  fi
+done
+
 # Function to handle cleanup when the script is terminated
 cleanup() {
   echo "Shutting down servers..."
@@ -428,12 +444,12 @@ trap cleanup SIGINT SIGTERM
 
 # Run the main server with watch mode
 echo "Starting main server in watch mode..."
-deno run --allow-all --unstable-detect-cjs --unstable-kv --watch src/main.ts &
+deno run --allow-all --unstable-detect-cjs --unstable-kv --unstable-net --watch src/main.ts &
 MAIN_PID=\$!
 
 # Telnet runs without --watch so it stays up across code reloads.
 echo "Starting telnet server..."
-deno run --allow-all --unstable-detect-cjs --unstable-kv src/telnet.ts &
+deno run --allow-all --unstable-detect-cjs --unstable-kv --unstable-net src/telnet.ts &
 TELNET_PID=\$!
 
 # Wait for both processes

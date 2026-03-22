@@ -36,6 +36,8 @@ interface RegistryEntry {
   description: string;
   source: string;
   author: string;
+  /** The git tag, branch, or commit SHA this entry was installed/updated from. */
+  ref?: string;
   installedAt: string;
   updatedAt: string;
 }
@@ -145,6 +147,8 @@ export async function ensurePlugins(pluginsDir: string): Promise<void> {
   }
 
   const registryPath = dpath.join(pluginsDir, ".registry.json");
+  const reg = await readRegistry(registryPath);
+  const installed: string[] = [];
 
   for (const entry of manifest.plugins) {
     // H1 — reject names with path traversal sequences
@@ -168,29 +172,41 @@ export async function ensurePlugins(pluginsDir: string): Promise<void> {
     }
 
     const targetDir = dpath.join(pluginsDir, entry.name);
-    if (await exists(targetDir)) continue;
+    if (await exists(targetDir)) {
+      const installedRef = reg[entry.name]?.ref;
+      // Only auto-update when the manifest has a ref AND it differs from what's installed.
+      // Unpinned plugins (no manifest ref) are left as-is to avoid surprising HEAD re-fetches.
+      if (!entry.ref || installedRef === entry.ref) continue;
 
-    console.log(`[ensurePlugins] Plugin "${entry.name}" not found — installing from ${entry.url}${entry.ref ? `@${entry.ref}` : ""}`);
+      console.log(
+        `[ensurePlugins] Plugin "${entry.name}" ref changed ` +
+        `(${installedRef ?? "unpinned"} → ${entry.ref}) — updating...`,
+      );
+      await Deno.remove(targetDir, { recursive: true });
+    }
 
-    const tempDir = await Deno.makeTempDir({ prefix: "ursamu-plugin-" });
+    // Use a subdirectory as the clone destination so git creates it itself.
+    // Cloning into a pre-existing directory (even empty) fails on some git versions.
+    const tempBase = await Deno.makeTempDir({ prefix: "ursamu-plugin-" });
+    const tempDir = dpath.join(tempBase, "plugin");
     try {
       const steps = buildCloneSteps(entry.url, tempDir, entry.ref);
       let stepFailed = false;
       for (const stepArgs of steps) {
-        const proc = new Deno.Command("git", {
+        const { success, stderr } = await new Deno.Command("git", {
           args: stepArgs,
-          stdout: "inherit",
-          stderr: "inherit",
-        });
-        const status = await proc.spawn().status;
-        if (!status.success) {
-          console.error(`[ensurePlugins] git ${stepArgs[0]} failed for "${entry.name}" (exit ${status.code})`);
+          stdout: "piped",
+          stderr: "piped",
+          env: { ...Deno.env.toObject(), GIT_TERMINAL_PROMPT: "0" },
+        }).output();
+        if (!success) {
+          console.error(`[ensurePlugins] Failed to install "${entry.name}": ${new TextDecoder().decode(stderr).trim()}`);
           stepFailed = true;
           break;
         }
       }
       if (stepFailed) {
-        await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+        await Deno.remove(tempBase, { recursive: true }).catch(() => {});
         continue;
       }
 
@@ -204,29 +220,36 @@ export async function ensurePlugins(pluginsDir: string): Promise<void> {
       try {
         await Deno.rename(tempDir, targetDir);
       } catch (renameErr) {
-        await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+        await Deno.remove(tempBase, { recursive: true }).catch(() => {});
         console.warn(`[ensurePlugins] Could not move "${entry.name}" into place: ${renameErr}`);
         continue;
       }
 
+      // tempBase is now empty after the rename — clean it up
+      await Deno.remove(tempBase, { recursive: true }).catch(() => {});
+
       const version = await readPluginVersion(targetDir);
       const now = new Date().toISOString();
-      const reg = await readRegistry(registryPath);
       reg[entry.name] = {
         name:        entry.name,
         version,
         description: entry.description ?? "",
         source:      entry.url,
         author:      "unknown",
-        installedAt: now,
+        ref:         entry.ref,
+        installedAt: reg[entry.name]?.installedAt ?? now,
         updatedAt:   now,
       };
       await writeRegistry(registryPath, reg);
 
-      console.log(`[ensurePlugins] Installed "${entry.name}" v${version}`);
+      installed.push(`${entry.name}@${version}`);
     } catch (err) {
-      await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+      await Deno.remove(tempBase, { recursive: true }).catch(() => {});
       console.error(`[ensurePlugins] Failed to install "${entry.name}":`, err);
     }
+  }
+
+  if (installed.length) {
+    console.log(`[plugins] Installed: ${installed.join(", ")}`);
   }
 }

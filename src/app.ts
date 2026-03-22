@@ -18,16 +18,135 @@
  * ```
  */
 
-import { authHandler, dbObjHandler, wikiHandler, configHandler, sceneHandler, buildingHandler, mailHandler } from "./routes/index.ts";
+import { authHandler, dbObjHandler, configHandler, sceneHandler } from "./routes/index.ts";
 import { meHandler, onlinePlayersHandler, channelsHandler, channelHistoryHandler } from "./routes/playersRouter.ts";
 import { authenticate } from "./middleware/authMiddleware.ts";
 import { getConfig } from "./services/Config/mod.ts";
+import { dbojs } from "./services/Database/database.ts";
+import type { IUIComponent } from "./@types/IUIComponent.ts";
 
 export { addCmd } from "./services/commands/cmdParser.ts";
 export type { ICmd } from "./@types/ICmd.ts";
+export type { IUIComponent } from "./@types/IUIComponent.ts";
 
 type PluginRouteHandler = (req: Request, userId: string | null) => Promise<Response>;
 const pluginRoutes: Array<{ prefix: string; handler: PluginRouteHandler }> = [];
+
+// ─── UI Component Registry ────────────────────────────────────────────────────
+
+const uiComponents: IUIComponent[] = [];
+
+/**
+ * Maps an addCmd-style lock string to the minimum privilege level required
+ * to see a component.
+ *
+ * 0 = everyone (pre-auth)
+ * 1 = connected player
+ * 2 = builder+
+ * 3 = admin+
+ * 4 = wizard / superuser
+ */
+function lockToMinPrivLevel(lock: string): number {
+  if (lock === "") return 0;
+  if (lock.includes("wizard"))  return 4;
+  if (lock.includes("admin"))   return 3;
+  if (lock.includes("builder")) return 2;
+  if (lock === "connected")     return 1;
+  return 1; // unknown lock — treat as connected (safe default)
+}
+
+/**
+ * Resolves the privilege level for a caller by looking up their DB flags.
+ *
+ * 0 = unauthenticated
+ * 1 = connected player (no special flags)
+ * 2 = builder
+ * 3 = admin
+ * 4 = wizard or superuser
+ */
+async function resolveCallerPrivLevel(userId: string | null): Promise<number> {
+  if (!userId) return 0;
+  const user = await dbojs.queryOne({ id: userId }).catch(() => null);
+  if (!user) return 0;
+  const flags = (user.flags ?? "").split(" ");
+  if (flags.includes("superuser")) return 4;
+  if (flags.includes("wizard"))    return 4; // M1 fix: wizard = same level as superuser
+  if (flags.includes("admin"))     return 3;
+  if (flags.includes("builder"))   return 1;
+  return 1;
+}
+
+/**
+ * Register a UI component contributed by a plugin.
+ *
+ * Duplicate `element` names replace the existing entry — safe for idempotent
+ * `init()` calls during hot-reload.
+ *
+ * @param component - Component descriptor; `lock` defaults to `"connected"`.
+ */
+export function registerUIComponent(component: IUIComponent): void {
+  // H1: Validate that the script URL is a relative same-origin path (starts with /).
+  // Reject absolute URLs (http://, https://, //) to prevent external script injection
+  // via a compromised or malicious plugin manifest.
+  if (component.script && !/^\//.test(component.script)) {
+    throw new Error(
+      `[registerUIComponent] Rejected external script URL for "${component.element}": ` +
+      `"${component.script}". Only relative paths starting with "/" are allowed.`
+    );
+  }
+  const idx = uiComponents.findIndex(c => c.element === component.element);
+  const entry = { ...component, lock: component.lock ?? "connected" };
+  if (idx !== -1) {
+    uiComponents[idx] = entry;
+  } else {
+    uiComponents.push(entry);
+  }
+}
+
+/**
+ * Remove a previously registered UI component by element name.
+ * No-op if the element was never registered.
+ *
+ * Call this in your plugin's `remove()` to clean up on hot-unload.
+ *
+ * @param elementName - Custom element tag name, e.g. `"ursamu-scenes"`.
+ */
+export function unregisterUIComponent(elementName: string): void {
+  const idx = uiComponents.findIndex(c => c.element === elementName);
+  if (idx !== -1) uiComponents.splice(idx, 1);
+}
+
+/**
+ * Returns a read-only snapshot of all currently registered UI components.
+ * Intended for tests and diagnostic tooling — not for production clients
+ * (use GET /api/v1/ui-manifest for privilege-filtered output).
+ */
+export function getRegisteredUIComponents(): readonly IUIComponent[] {
+  return uiComponents;
+}
+
+/**
+ * Handler for GET /api/v1/ui-manifest
+ *
+ * Returns all UI components visible to the caller, grouped by slot.
+ * Auth is optional — unauthenticated callers only see lock "" components.
+ */
+async function uiManifestHandler(req: Request): Promise<Response> {
+  const userId = await authenticate(req).catch(() => null);
+  const callerLevel = await resolveCallerPrivLevel(userId);
+
+  const visible = uiComponents
+    .filter(c => lockToMinPrivLevel(c.lock ?? "connected") <= callerLevel)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  const slots: Record<string, { element: string; script: string; label?: string; order: number }[]> = {};
+  for (const c of visible) {
+    if (!slots[c.slot]) slots[c.slot] = [];
+    slots[c.slot].push({ element: c.element, script: c.script, label: c.label, order: c.order ?? 0 });
+  }
+
+  return Response.json({ slots });
+}
 
 // --- Per-IP rate limiting for REST API ---
 const apiRateLimits = new Map<string, { count: number; resetAt: number }>();
@@ -99,7 +218,17 @@ export const handleRequest = async (req: Request, remoteAddr = "unknown"): Promi
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
-    "Content-Security-Policy": "default-src 'self'",
+    "Content-Security-Policy": [
+      "default-src 'none'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self' ws: wss:",
+      "font-src 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join("; "),
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
   };
   if (allowOrigin) corsHeaders["Access-Control-Allow-Origin"] = allowOrigin;
@@ -171,10 +300,6 @@ export const handleRequest = async (req: Request, remoteAddr = "unknown"): Promi
       return await dbObjHandler(req, userId);
     }
 
-    if (path.startsWith("/api/v1/wiki")) {
-      return await wikiHandler(req);
-    }
-
     if (path.startsWith("/api/v1/scenes")) {
       const userId = await authenticate(req);
       if (!userId) {
@@ -186,28 +311,6 @@ export const handleRequest = async (req: Request, remoteAddr = "unknown"): Promi
       return await sceneHandler(req, userId);
     }
     
-    if (path.startsWith("/api/v1/building")) {
-      const userId = await authenticate(req);
-      if (!userId) {
-        return new Response(JSON.stringify({ error: "Unauthorized" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return await buildingHandler(req, userId);
-    }
-
-    if (path.startsWith("/api/v1/mail")) {
-      const userId = await authenticate(req);
-      if (!userId) {
-        return new Response(JSON.stringify({ error: "Unauthorized" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return await mailHandler(req, userId);
-    }
-
     if (path === "/api/v1/config" || path.startsWith("/api/v1/config/") ||
         path === "/api/v1/connect" || path.startsWith("/api/v1/connect/") ||
         path === "/api/v1/welcome" || path.startsWith("/api/v1/welcome/")) {
@@ -250,6 +353,11 @@ export const handleRequest = async (req: Request, remoteAddr = "unknown"): Promi
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    // UI component manifest — optional auth, returns privilege-filtered component list
+    if (path === "/api/v1/ui-manifest" && req.method === "GET") {
+      return await uiManifestHandler(req);
     }
 
     // Plugin routes

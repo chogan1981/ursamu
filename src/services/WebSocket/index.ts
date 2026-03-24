@@ -145,22 +145,24 @@ export class WebSocketService {
                     return;
                 }
 
-                // Update cid if provided (handling migration from socket.io logic)
-                // Security: only allow cid to be set when the socket has no cid yet,
-                // preventing CID spoofing/impersonation of other players.
-                if (data.data?.cid && !sockData.cid) {
-                    sockData.cid = data.data.cid;
-                    const player = await playerForSocket(sockData);
-                    if (player) {
-                        // Restore connected flag if missing
-                        if (!player.flags.includes("connected")) {
-                            await setFlags(player, "connected");
-                            console.log(`[WS] Restored session for ${moniker(player)}`);
+                // Restore session via cid — only allowed from telnet proxy (localhost).
+                // Security: raw cid is trusted only when the socket is from the local
+                // telnet sidecar. External web clients must use JWT auth (above).
+                if (data.data?.cid && !sockData.cid && sockData.clientType === "telnet") {
+                    const socketIp = this.socketIp.get(socket);
+                    if (socketIp && (socketIp === "127.0.0.1" || socketIp === "::1" || socketIp === "localhost")) {
+                        sockData.cid = data.data.cid;
+                        const player = await playerForSocket(sockData);
+                        if (player) {
+                            if (!player.flags.includes("connected")) {
+                                await setFlags(player, "connected");
+                                console.log(`[WS] Restored session for ${moniker(player)}`);
+                            }
+                            const { joinChans } = await import("../../utils/joinChans.ts");
+                            await joinChans({ socket: sockData, msg: "" });
                         }
-                        // Always rejoin channel rooms — socket rooms are in-memory
-                        // and lost on server restart even if the connected flag persists
-                        const { joinChans } = await import("../../utils/joinChans.ts");
-                        await joinChans({ socket: sockData, msg: "" });
+                    } else {
+                        console.warn(`[WS] Rejected raw cid from non-local IP: ${socketIp}`);
                     }
                 }
 
@@ -206,7 +208,7 @@ export class WebSocketService {
             }
         });
 
-        socket.addEventListener("close", async () => {
+        socket.addEventListener("close", () => {
             const sockData = this.socketData.get(socket);
             this.clients.delete(socket);
             this.socketData.delete(socket);
@@ -214,37 +216,56 @@ export class WebSocketService {
             if (sockData?.id) this.rateLimits.delete(sockData.id);
 
             if (sockData?.cid) {
-                const player = await playerForSocket(sockData);
-                if (player) {
-                    await setFlags(player, "!connected");
-                    await hooks.adisconnect(player);
-
-                    if (player.location) {
-                        const { dbojs } = await import("../Database/index.ts");
-                        const roomPlayers = await dbojs.query({
-                            $and: [{ location: player.location }, { flags: /connected/i }, { id: { $ne: player.id } }]
-                        });
-                        const room = await dbojs.queryOne({ id: player.location });
-                        const roomData = room ? {
-                            name: room.data?.name || "",
-                            desc: (room.data?.description as string) || (room.data?.desc as string) || "",
-                            exits: [],
-                            players: [],
-                            items: []
-                        } : { name: "", desc: "", exits: [], players: [], items: [] };
-
-                        this.send(
-                            roomPlayers.map(p => p.id),
-                            {
-                                event: "disconnect",
-                                payload: {
-                                    msg: `${moniker(player)} has disconnected.`,
-                                    room: roomData
-                                }
-                            }
-                        );
+                const cidToCheck = sockData.cid;
+                // Grace period: wait 5 seconds before running disconnect cleanup.
+                // If the player reconnects (e.g. server restart) within this window,
+                // the new socket will have the same cid and we skip the cleanup.
+                setTimeout(async () => {
+                    // Check if the player has reconnected on a different socket
+                    let reconnected = false;
+                    for (const [, meta] of this.socketData) {
+                        if (meta.cid === cidToCheck) {
+                            reconnected = true;
+                            break;
+                        }
                     }
-                }
+                    if (reconnected) {
+                        console.log(`[WS] Skipping disconnect cleanup for cid ${cidToCheck} — player reconnected.`);
+                        return;
+                    }
+
+                    const { dbojs } = await import("../Database/index.ts");
+                    const player = await dbojs.queryOne({ id: cidToCheck });
+                    if (player) {
+                        await setFlags(player, "!connected");
+                        await hooks.adisconnect(player);
+
+                        if (player.location) {
+                            const roomPlayers = await dbojs.query({
+                                $and: [{ location: player.location }, { flags: /connected/i }, { id: { $ne: player.id } }]
+                            });
+                            const room = await dbojs.queryOne({ id: player.location });
+                            const roomData = room ? {
+                                name: room.data?.name || "",
+                                desc: (room.data?.description as string) || (room.data?.desc as string) || "",
+                                exits: [],
+                                players: [],
+                                items: []
+                            } : { name: "", desc: "", exits: [], players: [], items: [] };
+
+                            this.send(
+                                roomPlayers.map(p => p.id),
+                                {
+                                    event: "disconnect",
+                                    payload: {
+                                        msg: `${moniker(player)} has disconnected.`,
+                                        room: roomData
+                                    }
+                                }
+                            );
+                        }
+                    }
+                }, 5000);
             }
         });
 
